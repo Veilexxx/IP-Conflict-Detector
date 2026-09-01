@@ -1,4 +1,4 @@
-# Net Tool — IP Conflict Scanner
+# IP Conflict Detector
 
 A lightweight PowerShell tool that scans an IPv4 network range, detects **IP
 conflicts** (a single IP answered by more than one device), and prints the
