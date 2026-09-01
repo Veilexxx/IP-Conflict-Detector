@@ -32,14 +32,19 @@ An IP conflict is detected via **MAC flip-flopping** in the ARP/neighbor cache:
 2. Reachability sweep: `System.Net.NetworkInformation.Ping.SendPingAsync` fired
    for every IP and awaited via `Task.GetAwaiter().GetResult()` (the .NET thread
    pool does the concurrency). Live hosts are collected.
-3. Conflict probe: for `-Rounds` rounds, re-ping each live host in parallel and
-   read the MAC from the neighbor cache (`Get-NetNeighbor`, falling back to
-   `arp -a`).
+3. Conflict probe: for `-Rounds` rounds, **re-ARP each live host** (and wait
+   `-RoundDelaySec` between rounds so the entry can re-resolve), then read the MAC
+   from the neighbor cache (`Get-NetNeighbor`, falling back to `arp -a`).
 4. Group `IP -> set<MAC>`. Any IP with >1 distinct MAC is a **conflict**.
 
-Because the user cannot flush the ARP cache without admin, conflict detection is
-*probabilistic*: it relies on repeated probes catching a MAC that alternates. This
-limitation is documented and expected.
+Because the OS keeps a single MAC per IP in the ARP cache, a conflict is only
+exposed when the cache **flips** to the second device between observations. The
+scan forces that flip by re-ARP'ing each target every round. With Administrator
+rights it flushes each ARP entry (`arp -d <ip>`) first — fully reliable. Without
+admin it cannot flush, so it relies on the cached entry aging out between rounds;
+this is *probabilistic* and may need more `-Rounds` / bigger `-RoundDelaySec`.
+This limitation is documented in the output (a "run as Administrator" tip) and
+expected.
 
 ## File layout
 
@@ -54,6 +59,15 @@ limitation is documented and expected.
 - [ ] Run a syntax parse: `powershell -NoProfile -Command "& { $null = [scriptblock]::Create((Get-Content -Raw .\Scan-IPConflicts.ps1)) }"` (or invoke `[System.Management.Automation.Language.Parser]::ParseFile`).
 - [ ] Run the tests: `powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\Test-ScanIPConflicts.ps1`
 - [ ] Confirm it still runs as a standard user (no admin) and emits progress.
+
+## Running / execution policy
+
+By default Windows PowerShell's `Restricted` execution policy blocks *all* scripts,
+even from an elevated (Administrator) shell — the symptom is
+"cannot be loaded because running scripts is disabled on this system." Contributors
+should launch with `powershell -ExecutionPolicy Bypass -File .\Scan-IPConflicts.ps1`
+(or `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` once). The
+test command above already passes `-ExecutionPolicy Bypass`.
 
 ## Testing without a network
 

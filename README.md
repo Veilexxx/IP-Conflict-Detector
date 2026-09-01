@@ -23,9 +23,41 @@ conflicted.
 
 - Windows
 - Windows PowerShell 5.1 (built in)
-- No admin rights needed
+- No admin rights needed (but running as Administrator gives more reliable conflict detection — see below)
 - No third-party modules
 - Network connectivity
+
+## First run: execution policy
+
+Windows PowerShell ships with the `Restricted` execution policy, which blocks **all**
+scripts from running (even as Administrator). You'll see an error like:
+
+> File ...\Scan-IPConflicts.ps1 cannot be loaded because running scripts is
+> disabled on this system.
+
+Pick **one** of the following:
+
+**Option A — Bypass just for this run** (recommended, no system change):
+
+```
+powershell -ExecutionPolicy Bypass -File .\Scan-IPConflicts.ps1 -Target 192.168.1.0/24
+```
+
+**Option B — Allow local scripts for your user, permanently:**
+
+```
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+(This affects only your account and only local scripts; signed/remote scripts are
+still validated. Run it once, then launch the script normally.)
+
+> If you downloaded the script from the web, PowerShell may also mark it as
+> "blocked". Unblock it once with:
+>
+> ```
+> Unblock-File -Path .\Scan-IPConflicts.ps1
+> ```
 
 ## Usage
 
@@ -51,12 +83,13 @@ Accepted range formats:
 
 ### Parameters
 
-| Parameter    | Default | Description                                            |
-|--------------|---------|--------------------------------------------------------|
-| `Target`     | *prompt*| Network range (CIDR, start–end, or single IP)          |
-| `Rounds`     | `3`     | Times each IP is probed (more = better conflict catch) |
-| `TimeoutMs`  | `250`   | Per-probe ICMP timeout (milliseconds)                  |
-| `NoPrompt`   | –       | Don't prompt; still required if `Target` is supplied   |
+| Parameter       | Default | Description                                                                 |
+|-----------------|---------|-----------------------------------------------------------------------------|
+| `Target`        | *prompt*| Network range (CIDR, start–end, or single IP)                               |
+| `Rounds`        | `5`     | Times each IP is re-probed; each round re-resolves ARP, catching MAC flips   |
+| `TimeoutMs`     | `250`   | Per-probe ICMP timeout (milliseconds)                                        |
+| `RoundDelaySec` | `2`     | Seconds to wait between rounds so the ARP entry can re-resolve               |
+| `NoPrompt`      | –       | Don't prompt; still required if `Target` is supplied                         |
 
 ### Examples
 
@@ -64,7 +97,32 @@ Accepted range formats:
 .\Scan-IPConflicts.ps1 -Target 192.168.1.0/24
 .\Scan-IPConflicts.ps1 -Target 192.168.1.1-192.168.1.254 -Rounds 5
 .\Scan-IPConflicts.ps1 -Target 10.0.0.1
+.\Scan-IPConflicts.ps1 -Target 192.168.1.0/24 -Rounds 8 -RoundDelaySec 3
 ```
+
+### Reliability & Administrator rights
+
+Windows holds only **one MAC per IP** in the ARP cache at a time, so an IP conflict
+is only seen when the cache *flips* to the second device between probe rounds.
+
+- **Run as Administrator** for the most reliable detection: the scan flushes each
+  ARP entry (`arp -d <ip>`) before re-resolving, so both MACs are observed.
+- **Without admin**, the scan cannot flush ARP, so it waits `-RoundDelaySec`
+  between rounds and relies on the entry aging out. Detection is then
+  *probabilistic* — if you get "No IP conflicts detected" with admin unavailable,
+  increase `-Rounds` and/or `-RoundDelaySec` and re-run.
+
+> **Enabling admin still requires the execution-policy step above.** To run as
+> Administrator with the policy bypass in one line, right-click the PowerShell icon
+> → *Run as Administrator*, then:
+>
+> ```
+> powershell -ExecutionPolicy Bypass -File .\Scan-IPConflicts.ps1 -Target 192.168.1.0/24
+> ```
+>
+> (Or set `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned`
+> once, then launch normally from an elevated shell.)
+
 
 ## Output
 

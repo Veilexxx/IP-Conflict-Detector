@@ -31,6 +31,13 @@
 .PARAMETER TimeoutMs
     Per-probe ICMP timeout in milliseconds. Default 250.
 
+.PARAMETER RoundDelaySec
+    Seconds to wait between probe rounds. Between rounds the script re-ARP's each
+    target so the neighbour cache can re-resolve; this is what exposes an IP whose
+    MAC flips between two devices (an IP conflict). A non-zero delay is important
+    because Windows keeps an ARP entry cached, so a too-fast scan only ever sees
+    one MAC. Default 2.
+
 .PARAMETER NoPrompt
     Do not prompt for input. NoPrompt is implicit when a Target is supplied.
     This parameter prevents Get-IPConflicts from blocking on a prompt.
@@ -45,11 +52,14 @@ param(
     [Parameter(Position = 0)]
     [string]$Target,
 
-    [ValidateRange(1, 40)]
-    [int]$Rounds = 3,
+    [ValidateRange(1, 60)]
+    [int]$Rounds = 5,
 
     [ValidateRange(50, 5000)]
     [int]$TimeoutMs = 250,
+
+    [ValidateRange(0, 60)]
+    [int]$RoundDelaySec = 2,
 
     [switch]$NoPrompt
 )
@@ -219,11 +229,28 @@ function Get-MACAddress {
 }
 
 function New-ConflictReport {
-    param([string[]]$IPs, [int]$Rounds)
+    param([string[]]$IPs, [int]$Rounds, [int]$RoundDelaySec)
 
     $ipMacs = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Collections.Generic.HashSet[string]]]::new()
+    $flushedAny = $false
 
     foreach ($round in 1..$Rounds) {
+        # Force the neighbour cache to re-resolve this round so a flapping MAC is
+        # exposed. When running as Administrator, flush each ARP entry directly
+        # (reliable). Without admin the flush silently fails and we fall back to
+        # waiting so the cached entry ages out and the OS re-ARP's naturally.
+        if ($round -gt 1) {
+            if ($RoundDelaySec -gt 0) { Start-Sleep -Seconds $RoundDelaySec }
+            foreach ($ip in $IPs) {
+                try {
+                    arp -d $ip 2>$null | Out-Null
+                    $flushedAny = $true
+                } catch {
+                    # No admin / not permitted: ignore, rely on the delay.
+                }
+            }
+        }
+
         Write-Progress -Activity "Probing network (round $round of $Rounds)" `
             -Status "Sending probes and collecting ARP entries..." `
             -PercentComplete (($round - 1) / $Rounds * 100)
@@ -256,6 +283,7 @@ function New-ConflictReport {
         }
     }
     Write-Progress -Activity "Probing network" -Completed
+    $script:ArpFlushActive = $flushedAny
 
     $report = [System.Collections.Generic.List[object]]::new()
     foreach ($key in $ipMacs.Keys) {
@@ -330,7 +358,7 @@ if ($reachable.Count -eq 0) {
 
 # Probe reachable hosts for MAC conflict detection
 Write-Host "Checking reachable hosts for IP conflicts..." -ForegroundColor Green
-$report = New-ConflictReport -IPs $reachable -Rounds $Rounds
+$report = New-ConflictReport -IPs $reachable -Rounds $Rounds -RoundDelaySec $RoundDelaySec
 
 $conflicts = @($report | Where-Object { $_.Conflicted })
 $clean = @($report | Where-Object { -not $_.Conflicted })
@@ -355,6 +383,13 @@ if ($conflicts.Count -gt 0) {
     }
 } else {
     Write-Host "No IP conflicts detected." -ForegroundColor Green
+    if (-not $script:ArpFlushActive) {
+        Write-Host ""
+        Write-Host "Tip: ARP flushing was unavailable (not running as Administrator), so conflict" -ForegroundColor DarkGray
+        Write-Host "detection relied on the neighbour cache re-resolving between rounds. Re-run" -ForegroundColor DarkGray
+        Write-Host "the scan as Administrator, or increase -Rounds / -RoundDelaySec, to catch" -ForegroundColor DarkGray
+        Write-Host "IPs whose MAC only flips occasionally." -ForegroundColor DarkGray
+    }
 }
 
 Write-Host ""
