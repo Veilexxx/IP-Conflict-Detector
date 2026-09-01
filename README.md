@@ -18,6 +18,11 @@ conflicted.
 > **Note:** Without admin rights you cannot flush the ARP cache, so detection is
 > probabilistic — it relies on repeated probes catching switches when the two
 > devices alternate answering. More rounds (`-Rounds`) also increase confidence.
+>
+> **Cannot test your own IP:** a conflict on the scanning machine's own address
+> is undetectable from that machine (pinging yourself never touches the network
+> and your own IP never appears in the ARP cache). The scanner skips its own IPs
+> with a warning — run the scan from a *different* device to test them.
 
 ## Requirements
 
@@ -108,9 +113,14 @@ is only seen when the cache *flips* to the second device between probe rounds.
 - **Run as Administrator** for the most reliable detection: the scan flushes each
   ARP entry (`arp -d <ip>`) before re-resolving, so both MACs are observed.
 - **Without admin**, the scan cannot flush ARP, so it waits `-RoundDelaySec`
-  between rounds and relies on the entry aging out. Detection is then
+  between rounds and relies on the entry aging out. Windows keeps an entry for
+  15–45 s, so short delays rarely expose a MAC flip. Detection is then
   *probabilistic* — if you get "No IP conflicts detected" with admin unavailable,
-  increase `-Rounds` and/or `-RoundDelaySec` and re-run.
+  re-run with e.g. `-Rounds 6 -RoundDelaySec 45`.
+- **Conflicts on your own IP are not detectable from this machine.** If the
+  conflicted address is assigned to the PC running the scan, that PC answers its
+  own pings via loopback and never ARPs for itself. The scanner detects this,
+  skips its own addresses, and warns you to run the scan from another device.
 
 > **Enabling admin still requires the execution-policy step above.** To run as
 > Administrator with the policy bypass in one line, right-click the PowerShell icon

@@ -46,6 +46,12 @@ this is *probabilistic* and may need more `-Rounds` / bigger `-RoundDelaySec`.
 This limitation is documented in the output (a "run as Administrator" tip) and
 expected.
 
+**Own-IP exclusion:** a conflict on the scanning machine's OWN address is
+undetectable from that machine — pinging yourself is loopback (never touches the
+wire) and Windows never puts your own IP in the ARP/neighbor cache. Reachable
+IPs that match a local interface address are therefore skipped before probing,
+with a loud warning telling the user to scan from a different device.
+
 ## File layout
 
 - `Scan-IPConflicts.ps1` — the single-file scanner (no external deps).
@@ -94,6 +100,10 @@ main script, and keep network I/O in separate functions.
 
 ## Gotchas
 
+- `arp -d` **exits 0 even when the deletion fails** ("The ARP entry deletion
+  failed: The requested operation requires elevation." goes to stderr). Never
+  gate flush-success on `$LASTEXITCODE` or try/catch — check elevation directly
+  via `[Security.Principal.WindowsPrincipal]`.
 - `Get-NetNeighbor` may return several rows; always take the first *Reachable /
   Stale* row and ignore the all-zero MAC (`00-00-00-00-00-00`).
 - ARP entries can be `Incomplete`; treat those as "no MAC" and keep probing.

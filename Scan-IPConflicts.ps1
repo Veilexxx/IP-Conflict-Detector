@@ -17,6 +17,11 @@
     best-effort scan; note that without admin you cannot flush the ARP cache, so
     conflict detection relies on repeated probing catching MAC flip-flopping.
 
+    LIMITATION: a conflict on THIS machine's own IP cannot be detected from this
+    machine — pinging yourself is loopback-only and your own IP never appears in
+    the ARP cache. Such addresses are skipped with a warning; scan from a
+    different device to test them.
+
 .PARAMETER Target
     The network range to scan. Accepts either form:
       * CIDR:           192.168.1.0/24
@@ -202,6 +207,15 @@ function Get-ReachableIPs {
     return ,@($results)
 }
 
+function Get-LocalIPv4Addresses {
+    # All IPv4 addresses assigned to this machine, across every interface.
+    # Pure .NET: works as a standard user and without the NetTCPIP module.
+    [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+        ForEach-Object { $_.GetIPProperties().UnicastAddresses } |
+        Where-Object { $_.Address.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork } |
+        ForEach-Object { $_.Address.ToString() }
+}
+
 function Get-MACAddress {
     param([string]$IP)
     try {
@@ -232,22 +246,28 @@ function New-ConflictReport {
     param([string[]]$IPs, [int]$Rounds, [int]$RoundDelaySec)
 
     $ipMacs = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Collections.Generic.HashSet[string]]]::new()
+    # arp.exe exits 0 even when the deletion fails ("requires elevation" goes to
+    # stderr), so gate the flush on a real elevation check instead of the result.
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $flushedAny = $false
 
     foreach ($round in 1..$Rounds) {
         # Force the neighbour cache to re-resolve this round so a flapping MAC is
         # exposed. When running as Administrator, flush each ARP entry directly
-        # (reliable). Without admin the flush silently fails and we fall back to
-        # waiting so the cached entry ages out and the OS re-ARP's naturally.
+        # (reliable). Without admin the flush is impossible, so we rely on the
+        # delay letting the cached entry age out and the OS re-ARP naturally.
         if ($round -gt 1) {
             if ($RoundDelaySec -gt 0) { Start-Sleep -Seconds $RoundDelaySec }
-            foreach ($ip in $IPs) {
-                try {
-                    arp -d $ip 2>$null | Out-Null
-                    $flushedAny = $true
-                } catch {
-                    # No admin / not permitted: ignore, rely on the delay.
+            if ($isAdmin) {
+                foreach ($ip in $IPs) {
+                    try {
+                        arp -d $ip 2>$null | Out-Null
+                    } catch {
+                        # Entry absent or deletion refused: ignore.
+                    }
                 }
+                $flushedAny = $true
             }
         }
 
@@ -356,9 +376,32 @@ if ($reachable.Count -eq 0) {
     exit 0
 }
 
+# Separate out this machine's own IPs. A conflict on your OWN address is
+# undetectable from the same machine: pinging yourself is answered by loopback
+# (the packet never reaches the other device) and your own IP never appears in
+# the ARP/neighbor cache, so no MAC is ever observed for it.
+$localIPs = @(Get-LocalIPv4Addresses)
+$ownIPs = @($reachable | Where-Object { $localIPs -contains $_ })
+$probeIPs = @($reachable | Where-Object { $localIPs -notcontains $_ })
+
+if ($ownIPs.Count -gt 0) {
+    Write-Host "WARNING: these reachable IP(s) belong to THIS machine and were skipped:" -ForegroundColor Yellow
+    foreach ($ip in $ownIPs) {
+        Write-Host "    $ip" -ForegroundColor Yellow
+    }
+    Write-Host "  A conflict on your own IP CANNOT be detected from this machine. Run this" -ForegroundColor Yellow
+    Write-Host "  scan from a DIFFERENT device on the same network to test that address." -ForegroundColor Yellow
+    Write-Host ""
+}
+
+if ($probeIPs.Count -eq 0) {
+    Write-Host "No remote hosts left to probe; cannot evaluate conflicts." -ForegroundColor Yellow
+    exit 0
+}
+
 # Probe reachable hosts for MAC conflict detection
 Write-Host "Checking reachable hosts for IP conflicts..." -ForegroundColor Green
-$report = New-ConflictReport -IPs $reachable -Rounds $Rounds -RoundDelaySec $RoundDelaySec
+$report = New-ConflictReport -IPs $probeIPs -Rounds $Rounds -RoundDelaySec $RoundDelaySec
 
 $conflicts = @($report | Where-Object { $_.Conflicted })
 $clean = @($report | Where-Object { -not $_.Conflicted })
@@ -368,6 +411,9 @@ Write-Host "====================================================================
 Write-Host "                             RESULTS" -ForegroundColor Cyan
 Write-Host "======================================================================" -ForegroundColor Cyan
 Write-Host ("Total hosts scanned : {0}" -f $reachable.Count) -ForegroundColor Yellow
+if ($ownIPs.Count -gt 0) {
+    Write-Host ("Skipped (this PC)   : {0}" -f $ownIPs.Count) -ForegroundColor Yellow
+}
 Write-Host ("Hosts responding    : {0}" -f $report.Count) -ForegroundColor Yellow
 Write-Host ("IP conflicts found  : {0}" -f $conflicts.Count) -ForegroundColor $(if ($conflicts.Count -gt 0) { 'Red' } else { 'Green' })
 Write-Host ""
@@ -386,9 +432,10 @@ if ($conflicts.Count -gt 0) {
     if (-not $script:ArpFlushActive) {
         Write-Host ""
         Write-Host "Tip: ARP flushing was unavailable (not running as Administrator), so conflict" -ForegroundColor DarkGray
-        Write-Host "detection relied on the neighbour cache re-resolving between rounds. Re-run" -ForegroundColor DarkGray
-        Write-Host "the scan as Administrator, or increase -Rounds / -RoundDelaySec, to catch" -ForegroundColor DarkGray
-        Write-Host "IPs whose MAC only flips occasionally." -ForegroundColor DarkGray
+        Write-Host "detection relied on the neighbour cache aging out between rounds. Windows" -ForegroundColor DarkGray
+        Write-Host "keeps an ARP entry for 15-45 s, so short delays rarely expose a MAC flip." -ForegroundColor DarkGray
+        Write-Host "Re-run as Administrator, or with e.g. -Rounds 6 -RoundDelaySec 45, for" -ForegroundColor DarkGray
+        Write-Host "better odds of catching an IP whose MAC only flips occasionally." -ForegroundColor DarkGray
     }
 }
 
